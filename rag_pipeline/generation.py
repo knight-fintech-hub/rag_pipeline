@@ -102,13 +102,21 @@ class Generation:
             doc.get("page_content", "") for doc in docs if doc.get("page_content", "").strip()
         )
 
-    def _call(self, system_prompt: str, user_message: str) -> str:
+    def _call(
+        self,
+        system_prompt: str,
+        user_message: str,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
         pipe = self._get_pipeline()
         tokenizer = pipe.tokenizer
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message},
-        ]
+
+        # Build messages: system → history turns → current user turn
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        if chat_history:
+            messages.extend(chat_history)
+        messages.append({"role": "user", "content": user_message})
+
         formatted = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -122,6 +130,7 @@ class Generation:
         query: str,
         docs: List[Dict],
         system_prompt: Optional[str] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, str]:
         context = self._build_context(docs)
 
@@ -132,8 +141,8 @@ class Generation:
             sys_prompt = DIRECT_SYSTEM_PROMPT
             user_message = query
 
-        print(f"[Generation] Generating answer (context_docs={len(docs)}, rag={'yes' if context else 'no'})...")
-        answer = self._call(sys_prompt, user_message)
+        print(f"[Generation] Generating answer (context_docs={len(docs)}, rag={'yes' if context else 'no'}, history_turns={len(chat_history) if chat_history else 0})...")
+        answer = self._call(sys_prompt, user_message, chat_history=chat_history)
         print(f"[Generation] Done.")
 
         return {
@@ -143,9 +152,13 @@ class Generation:
             "rag_used": bool(context),
         }
 
-    def generate_direct(self, query: str) -> str:
+    def generate_direct(
+        self,
+        query: str,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
         print("[Generation] Direct generation (no context)...")
-        return self._call(DIRECT_SYSTEM_PROMPT, query)
+        return self._call(DIRECT_SYSTEM_PROMPT, query, chat_history=chat_history)
 
     def __repr__(self) -> str:
         return (

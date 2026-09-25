@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 from typing import Dict, List, Optional
 
 import pymupdf4llm
