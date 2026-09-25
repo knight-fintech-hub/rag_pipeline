@@ -1,5 +1,5 @@
 scripts/
-rag_agent.py
+
 .env
 .env.local
 *.json
