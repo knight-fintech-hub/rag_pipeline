@@ -14,6 +14,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rag_pipeline.rag_agent import RAGAgent
+from config import cfg
+from database import init_db, close_pool
 
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploaded_documents")
@@ -31,17 +33,21 @@ def get_agent() -> RAGAgent:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[API] Server starting up.")
+    # ── Startup ──────────────────────────────────────────────────────────────
+    print(f"[API] Server starting up. (USE_DB={cfg.USE_DB}, DEBUG={cfg.DEBUG})")
+    if cfg.USE_DB:
+        db_ok = init_db()
+        if not db_ok:
+            print("[API] Warning: DB unavailable — session history will be disabled.")
+    else:
+        print("[API] USE_DB=false — skipping database connection.")
+
     yield
+
+    # ── Shutdown ─────────────────────────────────────────────────────────────
     print("[API] Server shutting down.")
-    global _agent
-    if _agent is not None and getattr(_agent, "vector_store", None) is not None:
-        try:
-            if _agent.vector_store._client is not None:
-                _agent.vector_store._client.close()
-                print("[API] Qdrant client closed gracefully.")
-        except Exception as exc:
-            print(f"[API] Error closing Qdrant client: {exc}")
+    if cfg.USE_DB:
+        close_pool()
 
 
 app = FastAPI(
@@ -85,7 +91,7 @@ app.openapi = _patch_openapi
 
 
 class InitRequest(BaseModel):
-    collection_name: str = "company_docs"
+    collection_name: str = ""
     qdrant_path: str = ""
     embedding_model_path: str = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_m3"
     reranker_model_path: str = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_reranker_v2_m3"
@@ -93,7 +99,7 @@ class InitRequest(BaseModel):
     device: str = "cuda"
     top_k: int = Field(default=8, ge=1, le=50)
     top_n: int = Field(default=3, ge=1, le=20)
-    score_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+    score_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     gpu_batch_size: int = Field(default=32, ge=1)
     max_new_tokens: int = Field(default=512, ge=64)
     quantize: bool = True
@@ -103,6 +109,14 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="The question to answer.")
     collection_name: Optional[str] = Field(default=None, description="Optional collection to query. Defaults to active collection.")
     doc_ids: Optional[List[str]] = Field(default=None, description="Optional list of document IDs to filter the search by.")
+    session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional session ID (UUID from the DB). When supplied the LLM receives "
+            "the prior conversation turns for this session as context, and the new "
+            "Q/A pair is saved back so future queries remain context-aware."
+        ),
+    )
 
 
 class DocumentMetadata(BaseModel):
@@ -259,7 +273,14 @@ async def ingest(
 async def query(request: QueryRequest):
     agent = get_agent()
     try:
-        result = await asyncio.to_thread(agent.invoke, request.question, request.doc_ids, request.collection_name)
+        result = await asyncio.to_thread(
+            agent.invoke,
+            request.question,
+            request.doc_ids,
+            request.session_id,
+            request.collection_name
+        )
+       
         return JSONResponse(
             status_code=200,
             content={
@@ -270,10 +291,13 @@ async def query(request: QueryRequest):
                 "top_rerank_score": result.get("top_rerank_score"),
                 "reason":           result.get("reason"),
                 "latencies":        result.get("latencies", {}),
+                "session_id":       request.session_id,
+                "collection_name":  request.collection_name
             },
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Query failed: {exc}")
+
 
 
 @app.get(
@@ -310,16 +334,19 @@ async def list_collections():
 
 @app.get(
     "/collection/info",
-    summary="Collection stats",
-    description="Returns Qdrant collection metadata (point count, vector dimensions, etc.).",
+    summary="Collection stats and documents",
+    description="Returns Qdrant collection metadata and a deduplicated list of every ingested document.",
 )
 async def collection_info(collection_name: Optional[str] = None):
     agent = get_agent()
     try:
         info = agent.vector_store.get_collection_info(collection_name=collection_name)
+        docs = await asyncio.to_thread(agent.vector_store.list_documents)
+        info["documents"] = docs
+        info["total_documents"] = len(docs)
         return JSONResponse(status_code=200, content=info)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not fetch collection info: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not fetch collection info and documents: {exc}")
 
 
 @app.delete(

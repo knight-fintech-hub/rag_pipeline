@@ -222,6 +222,39 @@ class QdrantVectorStore:
             for hit in hits
         ]
 
+    def list_documents(self, collection_name: Optional[str] = None) -> List[Dict[str, str]]:
+        """Return a deduplicated list of {doc_id, filename} for every ingested document."""
+        name = collection_name or self.default_collection
+        if not self.collection_exists(name):
+            return []
+
+        seen: dict[str, str] = {}  # doc_id -> filename
+        offset = None
+
+        while True:
+            result = self.client.scroll(
+                collection_name=name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points, next_offset = result
+
+            for point in points:
+                meta = (point.payload or {}).get("metadata", {})
+                doc_id = meta.get("doc_id")
+                source = meta.get("source", "")
+                filename = os.path.basename(source) if source else "unknown"
+                if doc_id and doc_id not in seen:
+                    seen[doc_id] = filename
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return [{"doc_id": doc_id, "filename": filename} for doc_id, filename in seen.items()]
+
     def __repr__(self) -> str:
         return (
             f"QdrantVectorStore("
