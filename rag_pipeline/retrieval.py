@@ -32,12 +32,15 @@ class Retrieval:
         query_vector: List[float],
         top_k: Optional[int] = None,
         payload_filter: Optional[Filter] = None,
+        collection_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         k = top_k or self.top_k
+        target_col = collection_name or self.collection_name
         if hasattr(self.client, "query_points"):
             res = self.client.query_points(
-                collection_name=self.collection_name,
+                collection_name=target_col,
                 query=query_vector,
+                using="dense",
                 limit=k,
                 score_threshold=self.score_threshold,
                 query_filter=payload_filter,
@@ -46,8 +49,9 @@ class Retrieval:
             hits = res.points
         else:
             hits = self.client.search(
-                collection_name=self.collection_name,
+                collection_name=target_col,
                 query_vector=query_vector,
+                using="dense",
                 limit=k,
                 score_threshold=self.score_threshold,
                 query_filter=payload_filter,
@@ -61,7 +65,7 @@ class Retrieval:
                 "page_content": (hit.payload or {}).get("page_content", ""),
                 "metadata": (hit.payload or {}).get("metadata", {}),
             })
-        print(f"[Retrieval] Dense search returned {len(results)} results.")
+        print(f"[Retrieval] Dense search returned {len(results)} results from '{target_col}'.")
         return results
 
     def mmr_search(
@@ -71,12 +75,15 @@ class Retrieval:
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
         payload_filter: Optional[Filter] = None,
+        collection_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         k = top_k or self.top_k
+        target_col = collection_name or self.collection_name
         if hasattr(self.client, "query_points"):
             res = self.client.query_points(
-                collection_name=self.collection_name,
+                collection_name=target_col,
                 query=query_vector,
+                using="dense",
                 limit=fetch_k,
                 query_filter=payload_filter,
                 with_payload=True,
@@ -85,8 +92,9 @@ class Retrieval:
             candidates_hits = res.points
         else:
             candidates_hits = self.client.search(
-                collection_name=self.collection_name,
+                collection_name=target_col,
                 query_vector=query_vector,
+                using="dense",
                 limit=fetch_k,
                 query_filter=payload_filter,
                 with_payload=True,
@@ -98,10 +106,11 @@ class Retrieval:
 
         candidates = []
         for hit in candidates_hits:
+            vec = hit.vector.get("dense") if isinstance(hit.vector, dict) else hit.vector
             candidates.append({
                 "id": str(hit.id),
                 "score": hit.score,
-                "vector": hit.vector if isinstance(hit.vector, list) else [],
+                "vector": vec if isinstance(vec, list) else [],
                 "page_content": (hit.payload or {}).get("page_content", ""),
                 "metadata": (hit.payload or {}).get("metadata", {}),
             })
@@ -129,7 +138,7 @@ class Retrieval:
         for doc in selected:
             doc.pop("vector", None)
 
-        print(f"[Retrieval] MMR search returned {len(selected)} results.")
+        print(f"[Retrieval] MMR search returned {len(selected)} results from '{target_col}'.")
         return selected
 
     def rrf_fuse(
@@ -150,11 +159,25 @@ class Retrieval:
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
         payload_filter: Optional[Filter] = None,
+        collection_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         k = top_k or self.top_k
+        target_col = collection_name or self.collection_name
 
-        dense_results = self.dense_search(query_vector, top_k=k, payload_filter=payload_filter)
-        mmr_results = self.mmr_search(query_vector, top_k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, payload_filter=payload_filter)
+        dense_results = self.dense_search(
+            query_vector,
+            top_k=k,
+            payload_filter=payload_filter,
+            collection_name=target_col,
+        )
+        mmr_results = self.mmr_search(
+            query_vector,
+            top_k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            payload_filter=payload_filter,
+            collection_name=target_col,
+        )
 
         doc_map: Dict[str, Dict[str, Any]] = {}
 
@@ -179,7 +202,7 @@ class Retrieval:
                 result["rrf_score"] = rrf_score
                 merged.append(result)
 
-        print(f"[Retrieval] Hybrid (RRF) fusion returned {len(merged)} candidates.")
+        print(f"[Retrieval] Hybrid (RRF) fusion returned {len(merged)} candidates from '{target_col}'.")
         return merged
 
     def retrieve(
@@ -189,6 +212,7 @@ class Retrieval:
         fetch_k: int = 20,
         lambda_mult: float = 0.5,
         payload_filter: Optional[Filter] = None,
+        collection_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return self.hybrid_search(
             query_vector=query_vector,
@@ -196,6 +220,7 @@ class Retrieval:
             fetch_k=fetch_k,
             lambda_mult=lambda_mult,
             payload_filter=payload_filter,
+            collection_name=collection_name,
         )
 
     def __repr__(self) -> str:
