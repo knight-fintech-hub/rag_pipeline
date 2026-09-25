@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 import shutil
 from contextlib import asynccontextmanager
 from typing import Annotated, Dict, List, Optional
@@ -33,6 +34,14 @@ async def lifespan(app: FastAPI):
     print("[API] Server starting up.")
     yield
     print("[API] Server shutting down.")
+    global _agent
+    if _agent is not None and getattr(_agent, "vector_store", None) is not None:
+        try:
+            if _agent.vector_store._client is not None:
+                _agent.vector_store._client.close()
+                print("[API] Qdrant client closed gracefully.")
+        except Exception as exc:
+            print(f"[API] Error closing Qdrant client: {exc}")
 
 
 app = FastAPI(
@@ -92,6 +101,7 @@ class InitRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="The question to answer.")
+    collection_name: Optional[str] = Field(default=None, description="Optional collection to query. Defaults to active collection.")
     doc_ids: Optional[List[str]] = Field(default=None, description="Optional list of document IDs to filter the search by.")
 
 
@@ -160,6 +170,7 @@ async def init_agent(request: InitRequest):
     description=(
         "Upload one or more PDF files via multipart/form-data. "
         "Files are saved to disk, chunked, embedded, and indexed into Qdrant. "
+        "If collection_name is provided, it is used; otherwise a unique ID (e.g. s5abdd6cc8d92) is generated. "
         "Set force_recreate=true to drop and rebuild the collection from scratch. "
         "Returns a unique doc_id for each uploaded file."
     ),
@@ -169,6 +180,10 @@ async def ingest(
         List[UploadFile],
         File(description="One or more PDF documents to ingest."),
     ],
+    collection_name: Annotated[
+        Optional[str],
+        Form(description="Optional custom collection name. If empty, a unique ID is auto-generated."),
+    ] = None,
     force_recreate: Annotated[
         bool,
         Form(description="Drop and recreate the Qdrant collection before indexing."),
@@ -179,6 +194,11 @@ async def ingest(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
+
+    if collection_name and collection_name.strip():
+        target_collection = collection_name.strip()
+    else:
+        target_collection = f"s{uuid.uuid4().hex[:12]}"
 
     saved_paths: List[str] = []
     rejected: List[str] = []
@@ -220,7 +240,7 @@ async def ingest(
         if not saved_paths:
             raise HTTPException(status_code=400, detail="No valid PDF files found in the request.")
 
-        result = await asyncio.to_thread(agent.ingest, saved_paths, force_recreate, doc_mapping)
+        result = await asyncio.to_thread(agent.ingest, saved_paths, force_recreate, doc_mapping, target_collection)
         result["documents_ingested"] = docs_meta
         return JSONResponse(status_code=200, content=result)
 
@@ -234,12 +254,12 @@ async def ingest(
     "/query",
     response_model=QueryResponse,
     summary="Query the RAG agent",
-    description="Ask a question. Can be filtered by doc_ids. Returns latency in seconds.",
+    description="Ask a question. Can be filtered by collection_name and doc_ids. Returns latency in seconds.",
 )
 async def query(request: QueryRequest):
     agent = get_agent()
     try:
-        result = await asyncio.to_thread(agent.invoke, request.question, request.doc_ids)
+        result = await asyncio.to_thread(agent.invoke, request.question, request.doc_ids, request.collection_name)
         return JSONResponse(
             status_code=200,
             content={
@@ -275,14 +295,28 @@ async def health():
 
 
 @app.get(
+    "/collections",
+    summary="List all collections",
+    description="Returns a list of all collection names currently present in Qdrant.",
+)
+async def list_collections():
+    agent = get_agent()
+    try:
+        cols_resp = agent.vector_store.client.get_collections()
+        return {"collections": [c.name for c in cols_resp.collections]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list collections: {exc}")
+
+
+@app.get(
     "/collection/info",
     summary="Collection stats",
     description="Returns Qdrant collection metadata (point count, vector dimensions, etc.).",
 )
-async def collection_info():
+async def collection_info(collection_name: Optional[str] = None):
     agent = get_agent()
     try:
-        info = agent.vector_store.get_collection_info()
+        info = agent.vector_store.get_collection_info(collection_name=collection_name)
         return JSONResponse(status_code=200, content=info)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not fetch collection info: {exc}")
@@ -291,13 +325,14 @@ async def collection_info():
 @app.delete(
     "/collection",
     summary="Delete collection",
-    description="Permanently drops the current Qdrant collection and all its data.",
+    description="Permanently drops a Qdrant collection and all its data.",
 )
-async def delete_collection():
+async def delete_collection(collection_name: Optional[str] = None):
     agent = get_agent()
     try:
-        agent.vector_store.delete_collection()
-        return {"status": "deleted", "collection": agent.collection_name}
+        target_col = collection_name or agent.collection_name
+        agent.vector_store.delete_collection(collection_name=target_col)
+        return {"status": "deleted", "collection": target_col}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
 
