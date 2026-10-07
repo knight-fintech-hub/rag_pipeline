@@ -7,7 +7,7 @@ from qdrant_client.models import Filter
 
 
 DEFAULT_QDRANT_PATH = "qdrant_store"
-DEFAULT_COLLECTION_NAME = "company_docs"
+DEFAULT_COLLECTION_NAME = "docs"
 DEFAULT_TOP_K = 8
 DEFAULT_SCORE_THRESHOLD = 0.0
 RRF_K = 60

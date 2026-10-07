@@ -74,7 +74,7 @@ DEFAULT_EMBEDDING_MODEL  = r"E:\ds-team\huggingface_models\Old BKP\test_models\b
 DEFAULT_RERANKER_MODEL   = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_reranker_v2_m3"
 DEFAULT_GENERATOR_MODEL  = r"E:\DS_Team_Share\hugging-face-model\Qwen2.5-14B-Instruct\models--Qwen--Qwen2.5-14B-Instruct\snapshots\cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8"
 DEFAULT_QDRANT_PATH      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qdrant_store")
-DEFAULT_COLLECTION_NAME  = "company_docs"
+DEFAULT_COLLECTION_NAME  = "docs"
 DEFAULT_DEVICE           = "cuda"
 DEFAULT_TOP_K            = 8
 DEFAULT_TOP_N            = 3
@@ -85,6 +85,7 @@ class RAGAgent:
 
     def __init__(
         self,
+        pdf_paths: List[str] = None,
         embedding_model_path: str = DEFAULT_EMBEDDING_MODEL,
         reranker_model_path: str = DEFAULT_RERANKER_MODEL,
         generator_model_path: str = DEFAULT_GENERATOR_MODEL,
@@ -97,9 +98,14 @@ class RAGAgent:
         gpu_batch_size: int = 32,
         max_new_tokens: int = 512,
         quantize: bool = True,
+        force_recreate= False
+        
     ) -> None:
-        self.collection_name = collection_name
+        self.collection_name = collection_name  
         self.score_threshold = score_threshold
+        
+        self.documents = pdf_paths
+        self.force_recreate= force_recreate
 
         self.ingestion = DocumentIngestion()
 
@@ -125,7 +131,7 @@ class RAGAgent:
             top_n=top_n,
         )
 
-        self.generator = Generation(
+        self.llm = Generation(
             model_path=generator_model_path,
             max_new_tokens=max_new_tokens,
             quantize=quantize,
@@ -133,11 +139,17 @@ class RAGAgent:
 
     def ingest(
         self,
-        pdf_paths: List[str],
-        force_recreate: bool = False,
+        pdf_paths: List[str] = None,
+        force_recreate: bool =None,
         doc_ids: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         latencies = {}
+        
+        if pdf_paths is None:
+            pdf_paths = self.documents
+        if force_recreate is None:
+            force_recreate = self.force_recreate
+
         print(f"\n[RAGAgent] Ingesting {len(pdf_paths)} document(s)...")
 
         t0 = time.perf_counter()
@@ -156,7 +168,7 @@ class RAGAgent:
         self.vector_store.create_collection(
             vector_size=vector_size,
             collection_name=self.collection_name,
-            force_recreate=force_recreate,
+            force_recreate=self.force_recreate,
         )
 
         texts = [c["text"] for c in chunks]
@@ -184,6 +196,7 @@ class RAGAgent:
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         t_total = time.perf_counter()
+
         latencies = {}
         print(f"\n[RAGAgent] ── Query: '{question}' (session={session_id or 'stateless'}) ──")
 
@@ -214,7 +227,7 @@ class RAGAgent:
         if not candidates:
             print("[RAGAgent] No candidates retrieved — answering directly.")
             t0 = time.perf_counter()
-            answer = self.generator.generate_direct(question, chat_history=chat_history or None)
+            answer = self.llm.generate_direct(question, chat_history=chat_history or None)
             latencies["generation"] = round(time.perf_counter() - t0, 4)
             latencies["total_query"] = round(time.perf_counter() - t_total, 4)
 
@@ -253,7 +266,7 @@ class RAGAgent:
         if top_score >= self.score_threshold:
             print("[RAGAgent] Relevant docs found — generating with RAG.")
             t0 = time.perf_counter()
-            result = self.generator.generate(question, reranked, chat_history=chat_history or None)
+            result = self.llm.generate(question, reranked, chat_history=chat_history or None)
             latencies["generation"] = round(time.perf_counter() - t0, 4)
             latencies["total_query"] = round(time.perf_counter() - t_total, 4)
 
@@ -270,7 +283,7 @@ class RAGAgent:
 
         print("[RAGAgent] Docs below threshold — answering directly.")
         t0 = time.perf_counter()
-        answer = self.generator.generate_direct(question, chat_history=chat_history or None)
+        answer = self.llm.generate_direct(question, chat_history=chat_history or None)
         latencies["generation"] = round(time.perf_counter() - t0, 4)
         latencies["total_query"] = round(time.perf_counter() - t_total, 4)
 

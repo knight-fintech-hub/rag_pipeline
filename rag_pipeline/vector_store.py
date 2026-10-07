@@ -43,7 +43,7 @@ except Exception:
 
 
 DEFAULT_QDRANT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qdrant_store")
-DEFAULT_COLLECTION_NAME = "company_docs"
+DEFAULT_COLLECTION_NAME = "docs"
 DEFAULT_DISTANCE_METRIC = Distance.COSINE
 DEFAULT_UPSERT_BATCH_SIZE = 100
 
@@ -254,6 +254,22 @@ class QdrantVectorStore:
             offset = next_offset
 
         return [{"doc_id": doc_id, "filename": filename} for doc_id, filename in seen.items()]
+
+    def delete_document(self, doc_id: str, collection_name: Optional[str] = None) -> None:
+        name = collection_name or self.default_collection
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        self.client.delete(
+            collection_name=name,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.doc_id",
+                        match=MatchValue(value=doc_id)
+                    )
+                ]
+            )
+        )
+        print(f"[VectorStore] Deleted document {doc_id} from '{name}'.")
 
     def __repr__(self) -> str:
         return (

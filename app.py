@@ -27,7 +27,31 @@ _agent: Optional[RAGAgent] = None
 def get_agent() -> RAGAgent:
     global _agent
     if _agent is None:
-        raise HTTPException(status_code=503, detail="RAGAgent is not initialised. Call POST /init first.")
+        try:
+            qdrant_path = os.environ.get(
+                "QDRANT_PATH", 
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_pipeline", "qdrant_store")
+            )
+            embedding_model_path = os.environ.get("EMBEDDING_MODEL_PATH", r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_m3")
+            reranker_model_path = os.environ.get("RERANKER_MODEL_PATH", r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_reranker_v2_m3")
+            generator_model_path = os.environ.get("GENERATOR_MODEL_PATH", r"E:\DS_Team_Share\hugging-face-model\Qwen2.5-14B-Instruct\models--Qwen--Qwen2.5-14B-Instruct\snapshots\cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8")
+            
+            _agent = RAGAgent(
+                collection_name=os.environ.get("COLLECTION_NAME", "docs"),
+                embedding_model_path=embedding_model_path,
+                reranker_model_path=reranker_model_path,
+                generator_model_path=generator_model_path,
+                qdrant_path=qdrant_path,
+                device=os.environ.get("DEVICE", "cuda"),
+                top_k=int(os.environ.get("TOP_K", "8")),
+                top_n=int(os.environ.get("TOP_N", "3")),
+                score_threshold=float(os.environ.get("SCORE_THRESHOLD", "0.6")),
+                gpu_batch_size=int(os.environ.get("GPU_BATCH_SIZE", "32")),
+                max_new_tokens=int(os.environ.get("MAX_NEW_TOKENS", "2048")),
+                quantize=os.environ.get("QUANTIZE", "True").lower() in ("true", "1", "yes"),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Agent initialisation failed: {exc}")
     return _agent
 
 
@@ -90,24 +114,8 @@ def _patch_openapi():
 app.openapi = _patch_openapi
 
 
-class InitRequest(BaseModel):
-    collection_name: str = ""
-    qdrant_path: str = ""
-    embedding_model_path: str = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_m3"
-    reranker_model_path: str = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_reranker_v2_m3"
-    generator_model_path: str = r"E:\DS_Team_Share\hugging-face-model\Qwen2.5-14B-Instruct\models--Qwen--Qwen2.5-14B-Instruct\snapshots\cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8"
-    device: str = "cuda"
-    top_k: int = Field(default=8, ge=1, le=50)
-    top_n: int = Field(default=3, ge=1, le=20)
-    score_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
-    gpu_batch_size: int = Field(default=32, ge=1)
-    max_new_tokens: int = Field(default=512, ge=64)
-    quantize: bool = True
-
-
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="The question to answer.")
-    collection_name: Optional[str] = Field(default=None, description="Optional collection to query. Defaults to active collection.")
     doc_ids: Optional[List[str]] = Field(default=None, description="Optional list of document IDs to filter the search by.")
     session_id: Optional[str] = Field(
         default=None,
@@ -117,6 +125,126 @@ class QueryRequest(BaseModel):
             "Q/A pair is saved back so future queries remain context-aware."
         ),
     )
+
+
+# ── /retrieve request / response ─────────────────────────────────────────────
+
+class RetrieveRequest(BaseModel):
+    query: str = Field(..., min_length=1, description="The search query to embed and retrieve against.")
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Optional session ID for audit / logging purposes.",
+    )
+    doc_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Filter results to only chunks belonging to these document IDs.",
+    )
+    collection_name: str = Field(
+        ...,
+        description="Target Qdrant collection.",
+    )
+    score_threshold: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum rerank score a chunk must have to be included in the response. "
+            "Overrides the agent-level threshold for this request."
+        ),
+    )
+    top_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="Number of candidate chunks fetched from the vector store before reranking.",
+    )
+    top_n: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description="Number of top chunks returned after reranking.",
+    )
+    fetch_k: int = Field(
+        default=20,
+        ge=1,
+        description="Internal MMR candidate pool size (used inside hybrid search).",
+    )
+    lambda_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="MMR diversity weight: 1.0 = pure relevance, 0.0 = maximum diversity.",
+    )
+
+
+class RetrievedChunk(BaseModel):
+    chunk_id: str = Field(..., description="Qdrant point ID of the chunk.")
+    page_content: str = Field(..., description="Raw text of the chunk.")
+    metadata: Dict = Field(default_factory=dict, description="Chunk metadata (doc_id, page, source, …).")
+    dense_score: Optional[float] = Field(default=None, description="Dense-vector similarity score.")
+    rerank_score: Optional[float] = Field(default=None, description="Cross-encoder rerank score (0–1).")
+    rrf_score: Optional[float] = Field(default=None, description="RRF fusion score (only set when hybrid search is used).")
+
+
+class RetrieveResponse(BaseModel):
+    query: str
+    session_id: Optional[str] = None
+    collection_name: str
+    chunks: List[RetrievedChunk]
+    total_retrieved: int = Field(..., description="Number of chunks returned after reranking / threshold filtering.")
+    top_rerank_score: Optional[float] = None
+    latencies: Dict[str, float]
+
+
+# ── /generate request / response ─────────────────────────────────────────────
+
+class ChunkInput(BaseModel):
+    """A retrieved chunk passed in as context to the generation endpoint."""
+    chunk_id: Optional[str] = Field(default=None, description="Qdrant point ID — informational only.")
+    page_content: str = Field(..., description="Raw text of the chunk.")
+    metadata: Optional[Dict] = Field(default=None, description="Optional chunk metadata.")
+    rerank_score: Optional[float] = Field(default=None, description="Score from the retrieval stage (used to decide RAG vs. direct mode).")
+
+
+class GenerateRequest(BaseModel):
+    query: str = Field(..., min_length=1, description="The user question / prompt to answer.")
+    chunks: List[ChunkInput] = Field(
+        default_factory=list,
+        description="Retrieved chunks from the /retrieve endpoint (or assembled externally).",
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID used to load chat history and persist this turn.",
+    )
+    score_threshold: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "If the best chunk rerank_score is below this value the LLM falls back to "
+            "direct (knowledge-only) generation. Defaults to the agent-level threshold."
+        ),
+    )
+    system_prompt: Optional[str] = Field(
+        default=None,
+        description="Custom system prompt. Overrides the built-in RAG/direct prompts when provided.",
+    )
+    max_new_tokens: Optional[int] = Field(
+        default=None,
+        ge=64,
+        description="Override max_new_tokens for this request only.",
+    )
+
+
+class GenerateResponse(BaseModel):
+    answer: str
+    mode: str = Field(..., description="'rag' when context was used, 'direct' otherwise.")
+    query: str
+    context_used: str = Field(..., description="The concatenated context string fed to the LLM.")
+    session_id: Optional[str] = None
+    chunks_used: int = Field(..., description="Number of chunks actually fed into the prompt.")
+    top_rerank_score: Optional[float] = None
+    latencies: Dict[str, float]
 
 
 class DocumentMetadata(BaseModel):
@@ -144,37 +272,7 @@ class QueryResponse(BaseModel):
     latencies: Dict[str, float]
 
 
-@app.post(
-    "/init",
-    summary="Initialise the RAG agent",
-    description="Creates the RAGAgent singleton with the given config. Must be called before /ingest or /query.",
-)
-async def init_agent(request: InitRequest):
-    global _agent
-    try:
-        qdrant_path = request.qdrant_path or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "rag_pipeline", "qdrant_store"
-        )
-        _agent = RAGAgent(
-            embedding_model_path=request.embedding_model_path,
-            reranker_model_path=request.reranker_model_path,
-            generator_model_path=request.generator_model_path,
-            qdrant_path=qdrant_path,
-            collection_name=request.collection_name,
-            device=request.device,
-            top_k=request.top_k,
-            top_n=request.top_n,
-            score_threshold=request.score_threshold,
-            gpu_batch_size=request.gpu_batch_size,
-            max_new_tokens=request.max_new_tokens,
-            quantize=request.quantize,
-        )
-        return JSONResponse(
-            status_code=200,
-            content={"status": "initialised", "collection": request.collection_name},
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Agent initialisation failed: {exc}")
+
 
 
 @app.post(
@@ -184,7 +282,6 @@ async def init_agent(request: InitRequest):
     description=(
         "Upload one or more PDF files via multipart/form-data. "
         "Files are saved to disk, chunked, embedded, and indexed into Qdrant. "
-        "If collection_name is provided, it is used; otherwise a unique ID (e.g. s5abdd6cc8d92) is generated. "
         "Set force_recreate=true to drop and rebuild the collection from scratch. "
         "Returns a unique doc_id for each uploaded file."
     ),
@@ -194,13 +291,9 @@ async def ingest(
         List[UploadFile],
         File(description="One or more PDF documents to ingest."),
     ],
-    collection_name: Annotated[
-        Optional[str],
-        Form(description="Optional custom collection name. If empty, a unique ID is auto-generated."),
-    ] = None,
     force_recreate: Annotated[
         bool,
-        Form(description="Drop and recreate the Qdrant collection before indexing."),
+        Form(description="Drop  and recreate the Qdrant collection before indexing."),
     ] = False,
 ):
     import uuid
@@ -208,11 +301,6 @@ async def ingest(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
-
-    if collection_name and collection_name.strip():
-        target_collection = collection_name.strip()
-    else:
-        target_collection = f"s{uuid.uuid4().hex[:12]}"
 
     saved_paths: List[str] = []
     rejected: List[str] = []
@@ -254,7 +342,7 @@ async def ingest(
         if not saved_paths:
             raise HTTPException(status_code=400, detail="No valid PDF files found in the request.")
 
-        result = await asyncio.to_thread(agent.ingest, saved_paths, force_recreate, doc_mapping, target_collection)
+        result = await asyncio.to_thread(agent.ingest, saved_paths, force_recreate, doc_mapping)
         result["documents_ingested"] = docs_meta
         return JSONResponse(status_code=200, content=result)
 
@@ -278,7 +366,6 @@ async def query(request: QueryRequest):
             request.question,
             request.doc_ids,
             request.session_id,
-            request.collection_name
         )
        
         return JSONResponse(
@@ -292,12 +379,227 @@ async def query(request: QueryRequest):
                 "reason":           result.get("reason"),
                 "latencies":        result.get("latencies", {}),
                 "session_id":       request.session_id,
-                "collection_name":  request.collection_name
             },
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Query failed: {exc}")
 
+
+# ── /retrieve endpoint ────────────────────────────────────────────────────────
+
+@app.post(
+    "/retrieve",
+    response_model=RetrieveResponse,
+    summary="Retrieve relevant chunks",
+    description=(
+        "Embeds the query, runs hybrid (dense + MMR) search over Qdrant, "
+        "reranks the candidates, optionally filters by a score threshold, and "
+        "returns the top-N chunks with their scores. "
+        "Use the returned chunks as input to POST /generate."
+    ),
+    tags=["RAG Pipeline"],
+)
+async def retrieve(request: RetrieveRequest):
+    import time
+    from qdrant_client.models import Filter, FieldCondition, MatchAny
+
+    agent = get_agent()
+    latencies: Dict[str, float] = {}
+
+    try:
+        # ── 1. Embed query ────────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        query_vector = await asyncio.to_thread(agent.embedder.embed_query, request.query)
+        latencies["query_embedding"] = round(time.perf_counter() - t0, 4)
+
+        # ── 2. Build optional payload filter ──────────────────────────────────
+        payload_filter = None
+        if request.doc_ids:
+            payload_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.doc_id",
+                        match=MatchAny(any=request.doc_ids),
+                    )
+                ]
+            )
+
+        # ── 3. Resolve collection name ────────────────────────────────────────
+        collection_name = request.collection_name or agent.collection_name
+
+        # ── 4. Hybrid retrieval ───────────────────────────────────────────────
+        t0 = time.perf_counter()
+        candidates = await asyncio.to_thread(
+            agent.retriever.retrieve,
+            query_vector,
+            request.top_k,          # top_k override (None → agent default)
+            request.fetch_k,
+            request.lambda_mult,
+            payload_filter,
+            collection_name,
+        )
+        latencies["retrieval"] = round(time.perf_counter() - t0, 4)
+
+        # ── 5. Rerank ─────────────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        reranked = await asyncio.to_thread(
+            agent.reranker.rerank,
+            request.query,
+            candidates,
+            request.top_n,          # top_n override (None → reranker default)
+        )
+        latencies["reranking"] = round(time.perf_counter() - t0, 4)
+
+        # ── 6. Optional score threshold filter ────────────────────────────────
+        threshold = request.score_threshold if request.score_threshold is not None else 0.0
+        if threshold > 0.0:
+            reranked = [c for c in reranked if c.get("rerank_score", 0.0) >= threshold]
+
+        top_score = reranked[0].get("rerank_score") if reranked else None
+
+        # ── 7. Serialise ──────────────────────────────────────────────────────
+        chunks_out = [
+            RetrievedChunk(
+                chunk_id=c.get("id", ""),
+                page_content=c.get("page_content", ""),
+                metadata=c.get("metadata", {}),
+                dense_score=c.get("score"),
+                rerank_score=c.get("rerank_score"),
+                rrf_score=c.get("rrf_score"),
+            )
+            for c in reranked
+        ]
+
+        latencies["total"] = round(sum(latencies.values()), 4)
+
+        return RetrieveResponse(
+            query=request.query,
+            session_id=request.session_id,
+            collection_name=collection_name,
+            chunks=chunks_out,
+            total_retrieved=len(chunks_out),
+            top_rerank_score=top_score,
+            latencies=latencies,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Retrieval failed: {exc}")
+
+
+# ── /generate endpoint ────────────────────────────────────────────────────────
+
+@app.post(
+    "/generate",
+    response_model=GenerateResponse,
+    summary="Generate an answer from retrieved chunks",
+    description=(
+        "Takes a query and a list of retrieved chunks (e.g. from POST /retrieve) "
+        "and generates a grounded answer. If the top chunk's rerank_score is below "
+        "score_threshold (or no chunks are provided) the LLM answers from its "
+        "general knowledge instead (direct mode)."
+    ),
+    tags=["RAG Pipeline"],
+)
+async def generate(request: GenerateRequest):
+    import time
+
+    agent = get_agent()
+    latencies: Dict[str, float] = {}
+
+    # ── Session history ───────────────────────────────────────────────────────
+    try:
+        from session_manager import load_history, save_turn
+        from config import cfg as _cfg
+        _use_db = _cfg.USE_DB
+    except Exception:
+        load_history = lambda *a, **kw: []
+        save_turn    = lambda *a, **kw: None
+        _use_db = False
+
+    chat_history = []
+    if request.session_id and _use_db:
+        chat_history = await asyncio.to_thread(load_history, request.session_id)
+
+    try:
+        # ── Convert ChunkInput → internal doc dicts ───────────────────────────
+        docs = [
+            {
+                "page_content": c.page_content,
+                "metadata": c.metadata or {},
+                "rerank_score": c.rerank_score,
+                "id": c.chunk_id or "",
+            }
+            for c in request.chunks
+        ]
+
+        # ── Determine generation mode ─────────────────────────────────────────
+        threshold = (
+            request.score_threshold
+            if request.score_threshold is not None
+            else agent.score_threshold
+        )
+        top_score = max(
+            (d["rerank_score"] for d in docs if d.get("rerank_score") is not None),
+            default=None,
+        )
+        use_rag = bool(docs) and (top_score is None or top_score >= threshold)
+
+        # ── Temporarily override max_new_tokens if requested ──────────────────
+        original_max = agent.llm.max_new_tokens
+        if request.max_new_tokens is not None:
+            agent.llm.max_new_tokens = request.max_new_tokens
+            if agent.llm._pipeline is not None:
+                agent.llm._pipeline.model.generation_config.max_new_tokens = request.max_new_tokens
+
+        try:
+            t0 = time.perf_counter()
+            if use_rag:
+                gen_result = await asyncio.to_thread(
+                    agent.llm.generate,
+                    request.query,
+                    docs,
+                    request.system_prompt,
+                    chat_history or None,
+                )
+                answer = gen_result["answer"]
+                context_used = gen_result.get("context", "")
+                mode = "rag"
+            else:
+                answer = await asyncio.to_thread(
+                    agent.llm.generate_direct,
+                    request.query,
+                    chat_history or None,
+                )
+                context_used = ""
+                mode = "direct"
+            latencies["generation"] = round(time.perf_counter() - t0, 4)
+        finally:
+            if request.max_new_tokens is not None:
+                agent.llm.max_new_tokens = original_max
+
+        # ── Persist turn ──────────────────────────────────────────────────────
+        if request.session_id and _use_db:
+            await asyncio.to_thread(save_turn, request.session_id, request.query, answer)
+
+        latencies["total"] = round(sum(latencies.values()), 4)
+
+        return GenerateResponse(
+            answer=answer,
+            mode=mode,
+            query=request.query,
+            context_used=context_used,
+            session_id=request.session_id,
+            chunks_used=len(docs) if use_rag else 0,
+            top_rerank_score=top_score,
+            latencies=latencies,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Generation failed: {exc}")
 
 
 @app.get(
@@ -313,55 +615,61 @@ async def health():
     return {
         "status": "ok",
         "agent_ready": agent_ready,
-        "collection": _agent.collection_name if _agent else None,
         "client_dir": client_dir,
     }
 
 
 @app.get(
-    "/collections",
-    summary="List all collections",
-    description="Returns a list of all collection names currently present in Qdrant.",
+    "/collections/info",
+    summary="List all collections with info and documents",
+    description="Returns a list of all collections, their metadata, and their stored documents.",
 )
-async def list_collections():
+async def get_all_collections_info():
     agent = get_agent()
     try:
         cols_resp = agent.vector_store.client.get_collections()
-        return {"collections": [c.name for c in cols_resp.collections]}
+        result = []
+        for c in cols_resp.collections:
+            info = agent.vector_store.get_collection_info(c.name)
+            docs = await asyncio.to_thread(agent.vector_store.list_documents, c.name)
+            result.append({
+                "collection_name": c.name,
+                "info": info,
+                "documents": docs
+            })
+        return JSONResponse(status_code=200, content={"collections": result})
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list collections: {exc}")
-
-
-@app.get(
-    "/collection/info",
-    summary="Collection stats and documents",
-    description="Returns Qdrant collection metadata and a deduplicated list of every ingested document.",
-)
-async def collection_info(collection_name: Optional[str] = None):
-    agent = get_agent()
-    try:
-        info = agent.vector_store.get_collection_info(collection_name=collection_name)
-        docs = await asyncio.to_thread(agent.vector_store.list_documents)
-        info["documents"] = docs
-        info["total_documents"] = len(docs)
-        return JSONResponse(status_code=200, content=info)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not fetch collection info and documents: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch collections info: {exc}")
 
 
 @app.delete(
     "/collection",
     summary="Delete collection",
-    description="Permanently drops a Qdrant collection and all its data.",
+    description="Permanently drops the initialized Qdrant collection and all its data.",
 )
-async def delete_collection(collection_name: Optional[str] = None):
+async def delete_collection():
     agent = get_agent()
     try:
-        target_col = collection_name or agent.collection_name
+        target_col = agent.collection_name
         agent.vector_store.delete_collection(collection_name=target_col)
         return {"status": "deleted", "collection": target_col}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
+
+
+@app.delete(
+    "/document/{doc_id}",
+    summary="Delete document",
+    description="Deletes a document from the initialized collection by its doc_id.",
+)
+async def delete_document(doc_id: str):
+    agent = get_agent()
+    try:
+        target_col = agent.collection_name
+        await asyncio.to_thread(agent.vector_store.delete_document, doc_id, target_col)
+        return {"status": "deleted", "doc_id": doc_id, "collection": target_col}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {exc}")
 
 
 if __name__ == "__main__":

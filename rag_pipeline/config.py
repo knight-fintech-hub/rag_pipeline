@@ -14,14 +14,14 @@ import torch
 
 # ── Embedding model ──────────────────────────────────────────────────
 DEFAULT_EMBEDDING_MODEL: str = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_m3"
-DEFAULT_DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
+DEFAULT_DEVICE: str ="cpu"
 DEFAULT_GPU_BATCH_SIZE: int = 32
 
 # ── Qdrant / Vector store ─────────────────────────────────────────────
 DEFAULT_QDRANT_PATH: str = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "qdrant_store"
 )
-DEFAULT_COLLECTION_NAME: str = "company_docs"
+DEFAULT_COLLECTION_NAME: str = "docs"
 DEFAULT_UPSERT_BATCH_SIZE: int = 100
 
 # ── Chunking ──────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_MODEL_PATH = r"E:\DS_Team_Share\hugging-face-model\Qwen2.5-14B-Instruct\models--Qwen--Qwen2.5-14B-Instruct\snapshots\cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8"
 DEFAULT_MAX_NEW_TOKENS = 512
-DEFAULT_TEMPERATURE = 0.0
+DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TOP_N_CONTEXT = 5
 
 RAG_SYSTEM_PROMPT = (

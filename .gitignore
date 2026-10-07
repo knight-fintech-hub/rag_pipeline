@@ -1,5 +1,4 @@
 scripts/
-rag_agent.py
 .env
 .env.local
 *.json
@@ -9,3 +8,5 @@ documents/
 data/
 uploaded_documents/
 __pycache__/
+rag_agent_lg.py
+session_chunks/

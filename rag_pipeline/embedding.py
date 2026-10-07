@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 
 
 DEFAULT_EMBEDDING_MODEL = r"E:\ds-team\huggingface_models\Old BKP\test_models\bge_m3"
-DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEFAULT_DEVICE = os.environ.get("DEVICE", "cuda")
 DEFAULT_GPU_BATCH_SIZE = 32
 # gpu_batch_size (explained):
 # - The gpu_batch_size parameter controls the number of texts passed to the model

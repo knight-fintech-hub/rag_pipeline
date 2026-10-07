@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 
 # chunk_logger.py lives at the project root (e:\Riya Rajput\rag\),
 # so one dirname() is all we need.
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # → e:\Riya Rajput\rag
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))   
 CHUNKS_DIR = os.path.join(_BASE_DIR, "session_chunks")   # → e:\Riya Rajput\rag\session_chunks
 
 
