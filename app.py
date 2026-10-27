@@ -123,8 +123,8 @@ class QueryRequest(BaseModel):
         default=None,
         description=(
             "Optional session ID (UUID from the DB). When supplied the LLM receives "
-            "the prior conversation turns for this session as context, and the new "
-            "Q/A pair is saved back so future queries remain context-aware."
+            "the prior conversation turns for this session as context; prior turns "
+            "also inform document retrieval, and the new Q/A pair is saved back."
         ),
     )
 
@@ -132,10 +132,14 @@ class QueryRequest(BaseModel):
 # ── /retrieve request / response ─────────────────────────────────────────────
 
 class RetrieveRequest(BaseModel):
-    query: str = Field(..., min_length=1, description="The search query to embed and retrieve against.")
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="The search query; prior session history is included when session_id is supplied.",
+    )
     session_id: Optional[str] = Field(
         default=None,
-        description="Optional session ID for audit / logging purposes.",
+        description="Optional session ID; prior conversation history is included in retrieval.",
     )
     doc_ids: Optional[List[str]] = Field(
         default=None,
@@ -399,7 +403,8 @@ async def query(request: QueryRequest):
     response_model=RetrieveResponse,
     summary="Retrieve relevant chunks",
     description=(
-        "Embeds the query, runs true hybrid search (dense semantic + BM25 keyword) over Qdrant, "
+        "Uses prior session history when a session_id is supplied, then embeds the query and runs "
+        "true hybrid search (dense semantic + BM25 keyword) over Qdrant, "
         "fuses results via RRF, reranks the candidates, optionally filters by a score threshold, and "
         "returns the top-N chunks with their scores. "
         "Use the returned chunks as input to POST /generate."
@@ -414,16 +419,22 @@ async def retrieve(request: RetrieveRequest):
     latencies: Dict[str, float] = {}
 
     try:
+        retrieval_query = request.query
+        if request.session_id and cfg.USE_DB:
+            from session_manager import build_retrieval_query, load_history
+            history = await asyncio.to_thread(load_history, request.session_id)
+            retrieval_query = build_retrieval_query(request.query, history)
+
         # ── 1. Embed query (dense + sparse) ──────────────────────────────────
         t0 = time.perf_counter()
-        query_vector = await asyncio.to_thread(agent.embedder.embed_query, request.query)
+        query_vector = await asyncio.to_thread(agent.embedder.embed_query, retrieval_query)
         latencies["query_embedding"] = round(time.perf_counter() - t0, 4)
 
         # Sparse (BM25) query vector — graceful fallback if unavailable
         query_sparse_vector = None
         try:
             t0 = time.perf_counter()
-            query_sparse_vector = await asyncio.to_thread(agent.embedder.embed_query_sparse, request.query)
+            query_sparse_vector = await asyncio.to_thread(agent.embedder.embed_query_sparse, retrieval_query)
             latencies["query_sparse_embedding"] = round(time.perf_counter() - t0, 4)
         except Exception as e:
             print(f"[API /retrieve] Sparse query embedding failed ({e}). BM25 will be skipped.")
@@ -461,7 +472,7 @@ async def retrieve(request: RetrieveRequest):
         t0 = time.perf_counter()
         reranked = await asyncio.to_thread(
             agent.reranker.rerank,
-            request.query,
+            retrieval_query,
             candidates,
             request.top_n,          # top_n override (None → reranker default)
         )

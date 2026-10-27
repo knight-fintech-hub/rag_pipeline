@@ -26,6 +26,21 @@ logger = get_logger(__name__)
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def build_retrieval_query(
+    question: str,
+    history: List[Dict[str, str]],
+) -> str:
+    """Include prior session messages when forming the document search query."""
+    if not history:
+        return question
+
+    conversation = "\n".join(
+        f"{message['role'].capitalize()}: {message['content']}"
+        for message in history
+    )
+    return f"Conversation history:\n{conversation}\n\nCurrent question:\n{question}"
+
+
 def load_history(
     session_id: str,
     max_turns: int = 10,

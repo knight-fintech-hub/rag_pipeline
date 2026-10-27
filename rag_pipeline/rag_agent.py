@@ -20,7 +20,7 @@ try:
     if _root not in sys.path:
         sys.path.insert(0, _root)
     from config import cfg as _cfg
-    from session_manager import load_history, save_turn
+    from session_manager import build_retrieval_query, load_history, save_turn
     from chunk_logger import log_chunks
     _SESSION_MANAGER_AVAILABLE = True
 except Exception:
@@ -28,6 +28,7 @@ except Exception:
     _SESSION_MANAGER_AVAILABLE = False
     load_history = lambda *a, **kw: []    # type: ignore[assignment]
     save_turn    = lambda *a, **kw: None  # type: ignore[assignment]
+    build_retrieval_query = lambda question, history: question  # type: ignore[assignment]
     log_chunks   = lambda *a, **kw: None  # type: ignore[assignment]
 
 
@@ -214,16 +215,17 @@ class RAGAgent:
         chat_history = []
         if session_id and _use_db():
             chat_history = load_history(session_id)
+        retrieval_query = build_retrieval_query(question, chat_history)
 
         t0 = time.perf_counter()
-        query_vector = self.embedder.embed_query(question)
+        query_vector = self.embedder.embed_query(retrieval_query)
         latencies["query_embedding"] = round(time.perf_counter() - t0, 4)
 
         # ── Sparse query vector for BM25 search ───────────────────────────
         query_sparse_vector = None
         try:
             t0 = time.perf_counter()
-            query_sparse_vector = self.embedder.embed_query_sparse(question)
+            query_sparse_vector = self.embedder.embed_query_sparse(retrieval_query)
             latencies["query_sparse_embedding"] = round(time.perf_counter() - t0, 4)
         except Exception as e:
             print(f"[RAGAgent] Warning: sparse query embedding failed ({e}). BM25 will be skipped.")
@@ -274,7 +276,7 @@ class RAGAgent:
             }
 
         t0 = time.perf_counter()
-        reranked = self.reranker.rerank(question, candidates)
+        reranked = self.reranker.rerank(retrieval_query, candidates)
         latencies["reranking"] = round(time.perf_counter() - t0, 4)
 
         top_score = reranked[0].get("rerank_score", 0.0) if reranked else 0.0
